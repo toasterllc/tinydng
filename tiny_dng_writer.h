@@ -33,6 +33,8 @@ THE SOFTWARE.
 #include <vector>
 #include <cstring>
 #include <cstdint>
+#include <limits>
+#include <type_traits>
 
 namespace tinydngwriter {
 
@@ -988,44 +990,55 @@ const static int kHeaderSize = 8;  // TIFF header size.
 // https://stackoverflow.com/questions/51142275/exact-value-of-a-floating-point-number-as-a-rational
 //
 // Return error flag
-static int DoubleToRational(double x, double *numerator, double *denominator) {
-  if (!std::isfinite(x)) {
-    *numerator = *denominator = 0.0;
-    if (x > 0.0) *numerator = 1.0;
-    if (x < 0.0) *numerator = -1.0;
-    return 1;
-  }
+template<typename T>
+static bool DoubleToRational(double x, T& n, T& d) {
+  constexpr bool T_Unsigned = std::is_unsigned_v<T>;
+  double numerator = 0;
+  double denominator = 0;
+  
+  if (!std::isfinite(x)) return false;
 
   // TIFF Rational use two uint32's, so reduce the bits
   int bdigits = FLT_MANT_DIG;
   int expo;
-  *denominator = 1.0;
-  *numerator = std::frexp(x, &expo) * std::pow(2.0, bdigits);
+  denominator = 1.0;
+  numerator = std::frexp(x, &expo) * std::pow(2.0, bdigits);
   expo -= bdigits;
   if (expo > 0) {
-    *numerator *= std::pow(2.0, expo);
+    numerator *= std::pow(2.0, expo);
   } else if (expo < 0) {
     expo = -expo;
     if (expo >= FLT_MAX_EXP - 1) {
-      *numerator /= std::pow(2.0, expo - (FLT_MAX_EXP - 1));
-      *denominator *= std::pow(2.0, FLT_MAX_EXP - 1);
-      return fabs(*numerator) < 1.0;
+      numerator /= std::pow(2.0, expo - (FLT_MAX_EXP - 1));
+      denominator *= std::pow(2.0, FLT_MAX_EXP - 1);
+      if (fabs(numerator) < 1) {
+        return false;
+      }
     } else {
-      *denominator *= std::pow(2.0, expo);
+      denominator *= std::pow(2.0, expo);
     }
   }
 
-  while (((std::fabs(*numerator) > 0.0) &&
-          (std::fabs(std::fmod(*numerator, 2)) <
+  while (((std::fabs(numerator) > 0) &&
+          (std::fabs(std::fmod(numerator, 2)) <
            std::numeric_limits<double>::epsilon()) &&
-          (std::fabs(std::fmod(*denominator, 2)) <
+          (std::fabs(std::fmod(denominator, 2)) <
            std::numeric_limits<double>::epsilon())) ||
-         (std::max(std::fabs(*numerator), std::fabs(*denominator)) >
+         (std::max(std::fabs(numerator), std::fabs(denominator)) >
           std::numeric_limits<unsigned int>::max())) {
-    *numerator /= 2.0;
-    *denominator /= 2.0;
+    numerator /= 2.0;
+    denominator /= 2.0;
   }
-  return 0;
+  
+  if constexpr (T_Unsigned) {
+    if (numerator<0 || denominator<0) {
+      return false;
+    }
+  }
+  
+  n = numerator;
+  d = denominator;
+  return true;
 }
 
 static inline bool IsBigEndian() {
@@ -1528,16 +1541,16 @@ bool DNGImage::SetBlackLevelRational(unsigned int num_samples,
     return false;
   }
 
-  std::vector<int32_t> vs(num_samples * 2);
+  std::vector<uint32_t> vs(num_samples * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(values[i], &numerator, &denominator) != 0) {
+    uint32_t numerator, denominator;
+    if (!DoubleToRational(values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
@@ -1571,16 +1584,16 @@ bool DNGImage::SetWhiteLevelRational(unsigned int num_samples,
     return false;
   }
 
-  std::vector<int32_t> vs(num_samples * 2);
+  std::vector<uint32_t> vs(num_samples * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(values[i], &numerator, &denominator) != 0) {
+    uint32_t numerator, denominator;
+    if (!DoubleToRational(values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
@@ -1605,15 +1618,11 @@ bool DNGImage::SetWhiteLevelRational(unsigned int num_samples,
 }
 
 bool DNGImage::SetXResolution(const double value) {
-  double numerator, denominator;
-  if (DoubleToRational(value, &numerator, &denominator) != 0) {
+  uint32_t data[2];
+  if (!DoubleToRational(value, data[0], data[1])) {
     // Couldn't represent fp value as integer rational value.
     return false;
   }
-
-  unsigned int data[2];
-  data[0] = static_cast<unsigned int>(numerator);
-  data[1] = static_cast<unsigned int>(denominator);
 
   // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
   if (swap_endian_) {
@@ -1634,15 +1643,11 @@ bool DNGImage::SetXResolution(const double value) {
 }
 
 bool DNGImage::SetYResolution(const double value) {
-  double numerator, denominator;
-  if (DoubleToRational(value, &numerator, &denominator) != 0) {
+  uint32_t data[2];
+  if (!DoubleToRational(value, data[0], data[1])) {
     // Couldn't represent fp value as integer rational value.
     return false;
   }
-
-  unsigned int data[2];
-  data[0] = static_cast<unsigned int>(numerator);
-  data[1] = static_cast<unsigned int>(denominator);
 
   // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
   if (swap_endian_) {
@@ -1806,8 +1811,8 @@ bool DNGImage::SetColorMatrix1(const unsigned int plane_count,
                                const double *matrix_values) {
   std::vector<int32_t> vs(plane_count * 3 * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
+    int32_t numerator, denominator;
+    if (!DoubleToRational(matrix_values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
@@ -1838,8 +1843,8 @@ bool DNGImage::SetColorMatrix2(const unsigned int plane_count,
                                const double *matrix_values) {
   std::vector<int32_t> vs(plane_count * 3 * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
+    int32_t numerator, denominator;
+    if (!DoubleToRational(matrix_values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
@@ -1870,14 +1875,14 @@ bool DNGImage::SetForwardMatrix1(const unsigned int plane_count,
                                  const double *matrix_values) {
   std::vector<int32_t> vs(plane_count * 3 * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
+    int32_t numerator, denominator;
+    if (!DoubleToRational(matrix_values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
@@ -1902,14 +1907,14 @@ bool DNGImage::SetForwardMatrix2(const unsigned int plane_count,
                                  const double *matrix_values) {
   std::vector<int32_t> vs(plane_count * 3 * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
+    int32_t numerator, denominator;
+    if (!DoubleToRational(matrix_values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
@@ -1934,14 +1939,14 @@ bool DNGImage::SetCameraCalibration1(const unsigned int plane_count,
                                      const double *matrix_values) {
   std::vector<int32_t> vs(plane_count * plane_count * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
+    int32_t numerator, denominator;
+    if (!DoubleToRational(matrix_values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
@@ -1966,14 +1971,14 @@ bool DNGImage::SetCameraCalibration2(const unsigned int plane_count,
                                      const double *matrix_values) {
   std::vector<int32_t> vs(plane_count * plane_count * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
+    int32_t numerator, denominator;
+    if (!DoubleToRational(matrix_values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
@@ -1996,16 +2001,16 @@ bool DNGImage::SetCameraCalibration2(const unsigned int plane_count,
 
 bool DNGImage::SetAnalogBalance(const unsigned int plane_count,
                                 const double *matrix_values) {
-  std::vector<int32_t> vs(plane_count * 2);
+  std::vector<uint32_t> vs(plane_count * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
+    uint32_t numerator, denominator;
+    if (!DoubleToRational(matrix_values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
@@ -2109,16 +2114,16 @@ bool DNGImage::SetCFAPattern(const unsigned int num_components,
 
 bool DNGImage::SetAsShotNeutral(const unsigned int plane_count,
                                 const double *matrix_values) {
-  std::vector<int32_t> vs(plane_count * 2);
+  std::vector<uint32_t> vs(plane_count * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
+    uint32_t numerator, denominator;
+    if (!DoubleToRational(matrix_values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
@@ -2141,16 +2146,16 @@ bool DNGImage::SetAsShotNeutral(const unsigned int plane_count,
 
 bool DNGImage::SetAsShotWhiteXY(const double x, const double y) {
   const double values[2] = {x, y};
-  std::vector<int32_t> vs(2 * 2);
+  std::vector<uint32_t> vs(2 * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
-    double numerator, denominator;
-    if (DoubleToRational(values[i], &numerator, &denominator) != 0) {
+    uint32_t numerator, denominator;
+    if (!DoubleToRational(values[i], numerator, denominator)) {
       // Couldn't represent fp value as integer rational value.
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
