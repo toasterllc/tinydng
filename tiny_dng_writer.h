@@ -132,6 +132,29 @@ static const int SAMPLEFORMAT_UINT = 1;  // Default
 static const int SAMPLEFORMAT_INT = 2;
 static const int SAMPLEFORMAT_IEEEFP = 3;  // floating point
 
+// Light source
+static const int LIGHTSOURCE_UNKNOWN = 0;
+static const int LIGHTSOURCE_DAYLIGHT = 1;
+static const int LIGHTSOURCE_FLUORESCENT = 2;
+static const int LIGHTSOURCE_TUNGSTEN_INCANDESCENT = 3;
+static const int LIGHTSOURCE_FLASH = 4;
+static const int LIGHTSOURCE_FINE_WEATHER = 9;
+static const int LIGHTSOURCE_CLOUDY_WEATHER = 10;
+static const int LIGHTSOURCE_SHADE = 11;
+static const int LIGHTSOURCE_DAYLIGHT_FLUORESCENT = 12;
+static const int LIGHTSOURCE_DAY_WHITE_FLUORESCENT = 13;
+static const int LIGHTSOURCE_COOL_WHITE_FLUORESCENT = 14;
+static const int LIGHTSOURCE_WHITE_FLUORESCENT = 15;
+static const int LIGHTSOURCE_STANDARD_LIGHT_A = 17;
+static const int LIGHTSOURCE_STANDARD_LIGHT_B = 18;
+static const int LIGHTSOURCE_STANDARD_LIGHT_C = 19;
+static const int LIGHTSOURCE_D55 = 20;
+static const int LIGHTSOURCE_D65 = 21;
+static const int LIGHTSOURCE_D75 = 22;
+static const int LIGHTSOURCE_D50 = 23;
+static const int LIGHTSOURCE_ISO_STUDIO_TUNGSTEN = 24;
+static const int LIGHTSOURCE_OTHER_LIGHT_SOURCE = 255;
+
 struct IFDTag {
   unsigned short tag;
   unsigned short type;
