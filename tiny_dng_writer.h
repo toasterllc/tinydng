@@ -32,6 +32,7 @@ THE SOFTWARE.
 #include <sstream>
 #include <vector>
 #include <cstring>
+#include <cstdint>
 
 namespace tinydngwriter {
 
@@ -195,6 +196,9 @@ class DNGImage {
 
   /// Specify black level per sample.
   bool SetBlackLevel(const unsigned int num_samples, const unsigned short *values);
+
+  /// Specify white level per sample.
+  bool SetWhiteLevel(const unsigned int num_samples, const unsigned short *values);
 
   /// Specify black level per sample (as rational values).
   bool SetBlackLevelRational(unsigned int num_samples, const double *values);
@@ -1032,7 +1036,7 @@ static inline bool IsBigEndian() {
 }
 
 static void swap2(unsigned short *val) {
-  unsigned short tmp = *val;
+  uint16_t tmp = *(uint16_t*)val;
   unsigned char *dst = reinterpret_cast<unsigned char *>(val);
   unsigned char *src = reinterpret_cast<unsigned char *>(&tmp);
 
@@ -1040,8 +1044,8 @@ static void swap2(unsigned short *val) {
   dst[1] = src[0];
 }
 
-static void swap4(unsigned int *val) {
-  unsigned int tmp = *val;
+static void swap4(void *val) {
+  uint32_t tmp = *(uint32_t*)val;
   unsigned char *dst = reinterpret_cast<unsigned char *>(val);
   unsigned char *src = reinterpret_cast<unsigned char *>(&tmp);
 
@@ -1052,7 +1056,7 @@ static void swap4(unsigned int *val) {
 }
 
 static void swap8(uint64_t *val) {
-  uint64_t tmp = *val;
+  uint64_t tmp = *(uint64_t*)val;
   unsigned char *dst = reinterpret_cast<unsigned char *>(val);
   unsigned char *src = reinterpret_cast<unsigned char *>(&tmp);
 
@@ -1500,6 +1504,20 @@ bool DNGImage::SetBlackLevel(const unsigned int num_components,
   return true;
 }
 
+bool DNGImage::SetWhiteLevel(const unsigned int num_components,
+                             const unsigned short *values) {
+  bool ret = WriteTIFFTag(
+      static_cast<unsigned short>(TIFFTAG_WHITE_LEVEL), TIFF_SHORT, num_components,
+      reinterpret_cast<const unsigned char *>(values), &ifd_tags_, &data_os_);
+
+  if (!ret) {
+    return false;
+  }
+
+  num_fields_++;
+  return true;
+}
+
 bool DNGImage::SetBlackLevelRational(unsigned int num_samples,
                                      const double *values) {
   // `SetSamplesPerPixel()` must be called in advance and SPP shoud be equal to
@@ -1510,7 +1528,7 @@ bool DNGImage::SetBlackLevelRational(unsigned int num_samples,
     return false;
   }
 
-  std::vector<unsigned int> vs(num_samples * 2);
+  std::vector<int32_t> vs(num_samples * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(values[i], &numerator, &denominator) != 0) {
@@ -1553,7 +1571,7 @@ bool DNGImage::SetWhiteLevelRational(unsigned int num_samples,
     return false;
   }
 
-  std::vector<unsigned int> vs(num_samples * 2);
+  std::vector<int32_t> vs(num_samples * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(values[i], &numerator, &denominator) != 0) {
@@ -1786,7 +1804,7 @@ bool DNGImage::SetDNGVersion(const unsigned char a,
 
 bool DNGImage::SetColorMatrix1(const unsigned int plane_count,
                                const double *matrix_values) {
-  std::vector<unsigned int> vs(plane_count * 3 * 2);
+  std::vector<int32_t> vs(plane_count * 3 * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
@@ -1794,8 +1812,8 @@ bool DNGImage::SetColorMatrix1(const unsigned int plane_count,
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
@@ -1818,7 +1836,7 @@ bool DNGImage::SetColorMatrix1(const unsigned int plane_count,
 
 bool DNGImage::SetColorMatrix2(const unsigned int plane_count,
                                const double *matrix_values) {
-  std::vector<unsigned int> vs(plane_count * 3 * 2);
+  std::vector<int32_t> vs(plane_count * 3 * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
@@ -1826,8 +1844,8 @@ bool DNGImage::SetColorMatrix2(const unsigned int plane_count,
       return false;
     }
 
-    vs[2 * i + 0] = static_cast<unsigned int>(numerator);
-    vs[2 * i + 1] = static_cast<unsigned int>(denominator);
+    vs[2 * i + 0] = numerator;
+    vs[2 * i + 1] = denominator;
 
     // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
     if (swap_endian_) {
@@ -1850,7 +1868,7 @@ bool DNGImage::SetColorMatrix2(const unsigned int plane_count,
 
 bool DNGImage::SetForwardMatrix1(const unsigned int plane_count,
                                  const double *matrix_values) {
-  std::vector<unsigned int> vs(plane_count * 3 * 2);
+  std::vector<int32_t> vs(plane_count * 3 * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
@@ -1882,7 +1900,7 @@ bool DNGImage::SetForwardMatrix1(const unsigned int plane_count,
 
 bool DNGImage::SetForwardMatrix2(const unsigned int plane_count,
                                  const double *matrix_values) {
-  std::vector<unsigned int> vs(plane_count * 3 * 2);
+  std::vector<int32_t> vs(plane_count * 3 * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
@@ -1914,7 +1932,7 @@ bool DNGImage::SetForwardMatrix2(const unsigned int plane_count,
 
 bool DNGImage::SetCameraCalibration1(const unsigned int plane_count,
                                      const double *matrix_values) {
-  std::vector<unsigned int> vs(plane_count * plane_count * 2);
+  std::vector<int32_t> vs(plane_count * plane_count * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
@@ -1946,7 +1964,7 @@ bool DNGImage::SetCameraCalibration1(const unsigned int plane_count,
 
 bool DNGImage::SetCameraCalibration2(const unsigned int plane_count,
                                      const double *matrix_values) {
-  std::vector<unsigned int> vs(plane_count * plane_count * 2);
+  std::vector<int32_t> vs(plane_count * plane_count * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
@@ -1978,7 +1996,7 @@ bool DNGImage::SetCameraCalibration2(const unsigned int plane_count,
 
 bool DNGImage::SetAnalogBalance(const unsigned int plane_count,
                                 const double *matrix_values) {
-  std::vector<unsigned int> vs(plane_count * 2);
+  std::vector<int32_t> vs(plane_count * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
@@ -2091,7 +2109,7 @@ bool DNGImage::SetCFAPattern(const unsigned int num_components,
 
 bool DNGImage::SetAsShotNeutral(const unsigned int plane_count,
                                 const double *matrix_values) {
-  std::vector<unsigned int> vs(plane_count * 2);
+  std::vector<int32_t> vs(plane_count * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(matrix_values[i], &numerator, &denominator) != 0) {
@@ -2123,7 +2141,7 @@ bool DNGImage::SetAsShotNeutral(const unsigned int plane_count,
 
 bool DNGImage::SetAsShotWhiteXY(const double x, const double y) {
   const double values[2] = {x, y};
-  std::vector<unsigned int> vs(2 * 2);
+  std::vector<int32_t> vs(2 * 2);
   for (size_t i = 0; i * 2 < vs.size(); i++) {
     double numerator, denominator;
     if (DoubleToRational(values[i], &numerator, &denominator) != 0) {
