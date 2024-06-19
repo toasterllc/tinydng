@@ -87,9 +87,7 @@ typedef enum {
   TIFFTAG_DEFAULT_BLACK_RENDER = 51110,
   TIFFTAG_ACTIVE_AREA = 50829,
   TIFFTAG_FORWARD_MATRIX1 = 50964,
-  TIFFTAG_FORWARD_MATRIX2 = 50965,
-  TIFFTAG_ILLUMINANT_DATA1 = 52533,
-  TIFFTAG_ILLUMINANT_DATA2 = 52534,
+  TIFFTAG_FORWARD_MATRIX2 = 50965
 } Tag;
 
 // SUBFILETYPE(bit field)
@@ -244,9 +242,6 @@ class DNGImage {
 
   bool SetCalibrationIlluminant1(const unsigned short value);
   bool SetCalibrationIlluminant2(const unsigned short value);
-  
-  bool SetCustomIlluminant1(double x, double y);
-  bool SetCustomIlluminant2(double x, double y);
 
   /// Specify DNG version.
   bool SetDNGVersion(const unsigned char a, const unsigned char b, const unsigned char c, const unsigned char d);
@@ -2119,118 +2114,6 @@ bool DNGImage::SetCalibrationIlluminant2(const unsigned short value) {
 
   num_fields_++;
   return true;
-}
-
-struct [[gnu::packed]] _IlluminantData {
-    uint16_t type;
-    uint32_t x_num;
-    uint32_t x_den;
-    uint32_t y_num;
-    uint32_t y_den;
-};
-
-//bool DNGImage::SetIlluminantData1(const unsigned short value) {
-//  const unsigned short zero = 0;
-//  
-//  bool ret = WriteTIFFTag(
-//      static_cast<unsigned short>(TIFFTAG_ILLUMINANT_DATA1), TIFF_NOTYPE, 1,
-//      reinterpret_cast<const unsigned char *>(&zero),
-//      &ifd_tags_, &data_os_);
-//
-//  if (!ret) {
-//    return false;
-//  }
-//
-//  num_fields_++;
-//  return true;
-//}
-
-bool DNGImage::SetCustomIlluminant1(double x, double y) {
-    uint16_t ill = LIGHTSOURCE_OTHER_LIGHT_SOURCE;
-    if (swap_endian_) swap2(&ill);
-    
-    bool ret = WriteTIFFTag(
-        static_cast<unsigned short>(TIFFTAG_CALIBRATION_ILLUMINANT1), TIFF_SHORT, 1,
-        reinterpret_cast<const unsigned char *>(&ill),
-        &ifd_tags_, &data_os_);
-    
-    if (!ret) return false;
-    num_fields_++;
-    
-    uint16_t type = 0;
-    uint32_t x_num, x_den;
-    uint32_t y_num, y_den;
-    if (!DoubleToRational(x, x_num, x_den)) return false;
-    if (!DoubleToRational(y, y_num, y_den)) return false;
-    
-    if (swap_endian_) {
-        swap2(&type);
-        swap4(&x_num);
-        swap4(&x_den);
-        swap4(&y_num);
-        swap4(&y_den);
-    }
-    
-    const _IlluminantData data = {
-        .type   = type,
-        .x_num  = x_num,
-        .x_den  = x_den,
-        .y_num  = y_num,
-        .y_den  = y_den,
-    };
-    
-    ret = WriteTIFFTag(
-        static_cast<unsigned short>(TIFFTAG_ILLUMINANT_DATA1), TIFF_NOTYPE, sizeof(data),
-        reinterpret_cast<const unsigned char *>(&data),
-        &ifd_tags_, &data_os_);
-    
-    if (!ret) return false;
-    num_fields_++;
-    return true;
-}
-
-bool DNGImage::SetCustomIlluminant2(double x, double y) {
-    uint16_t ill = LIGHTSOURCE_OTHER_LIGHT_SOURCE;
-    if (swap_endian_) swap2(&ill);
-    
-    bool ret = WriteTIFFTag(
-        static_cast<unsigned short>(TIFFTAG_CALIBRATION_ILLUMINANT2), TIFF_SHORT, 1,
-        reinterpret_cast<const unsigned char *>(&ill),
-        &ifd_tags_, &data_os_);
-    
-    if (!ret) return false;
-    num_fields_++;
-    
-    uint16_t type = 0;
-    uint32_t x_num, x_den;
-    uint32_t y_num, y_den;
-    if (!DoubleToRational(x, x_num, x_den)) return false;
-    if (!DoubleToRational(y, y_num, y_den)) return false;
-    
-    if (swap_endian_) {
-        swap2(&type);
-        swap4(&x_num);
-        swap4(&x_den);
-        swap4(&y_num);
-        swap4(&y_den);
-    }
-    
-    const _IlluminantData data = {
-        .type   = type,
-        .x_num  = x_num,
-        .x_den  = x_den,
-        .y_num  = y_num,
-        .y_den  = y_den,
-    };
-    
-    ret = WriteTIFFTag(
-        static_cast<unsigned short>(TIFFTAG_ILLUMINANT_DATA2), TIFF_NOTYPE, sizeof(data),
-        reinterpret_cast<const unsigned char *>(&data),
-        &ifd_tags_, &data_os_);
-    
-    if (!ret) return false;
-    num_fields_++;
-    return true;
 }
 
 bool DNGImage::SetCFAPattern(const unsigned int num_components,
