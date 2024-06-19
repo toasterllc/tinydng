@@ -79,6 +79,7 @@ typedef enum {
   TIFFTAG_ANALOG_BALANCE = 50727,
   TIFFTAG_AS_SHOT_NEUTRAL = 50728,
   TIFFTAG_AS_SHOT_WHITE_XY = 50729,
+  TIFFTAG_AS_BASELINE_EXPOSURE = 50730,
   TIFFTAG_CALIBRATION_ILLUMINANT1 = 50778,
   TIFFTAG_CALIBRATION_ILLUMINANT2 = 50779,
   TIFFTAG_EXTRA_CAMERA_PROFILES = 50933,
@@ -266,6 +267,10 @@ class DNGImage {
 
   /// Specify the the selected white balance at time of capture, encoded as x-y chromaticity coordinates.
   bool SetAsShotWhiteXY(const double x, const double y);
+  
+  /// Specify  how much (in EV units) to move the zero exposure point.
+  /// Positive values result in brighter default results, while negative values result in darker default results.
+  bool SetBaselineExposure(const double exp);
 
   /// Set image data with packing (take 16-bit values and pack them to input_bpp values).
   bool SetImageDataPacked(const unsigned short *input_buffer, const int input_count, const unsigned int input_bpp, bool big_endian);
@@ -2190,6 +2195,31 @@ bool DNGImage::SetAsShotWhiteXY(const double x, const double y) {
                           TIFF_RATIONAL, uint32_t(vs.size() / 2),
                           reinterpret_cast<const unsigned char *>(vs.data()),
                           &ifd_tags_, &data_os_);
+
+  if (!ret) {
+    return false;
+  }
+
+  num_fields_++;
+  return true;
+}
+
+bool DNGImage::SetBaselineExposure(const double exp) {
+  int32_t data[2];
+  if (!DoubleToRational(exp, data[0], data[1])) {
+    // Couldn't represent fp value as integer rational value.
+    return false;
+  }
+
+  // TODO(syoyo): Swap rational value(8 bytes) when writing IFD tag, not here.
+  if (swap_endian_) {
+    swap4(&data[0]);
+    swap4(&data[1]);
+  }
+
+  bool ret = WriteTIFFTag(
+      static_cast<unsigned short>(TIFFTAG_AS_BASELINE_EXPOSURE), TIFF_SRATIONAL, 1,
+      reinterpret_cast<const unsigned char *>(data), &ifd_tags_, &data_os_);
 
   if (!ret) {
     return false;
