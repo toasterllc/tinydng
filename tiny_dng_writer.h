@@ -33,6 +33,7 @@ THE SOFTWARE.
 #include <vector>
 #include <cstring>
 #include <cstdint>
+#include <cassert>
 #include <limits>
 #include <type_traits>
 
@@ -58,6 +59,7 @@ typedef enum {
   TIFFTAG_RESOLUTION_UNIT = 296,
 
   TIFFTAG_SOFTWARE = 305,
+  TIFFTAG_DATETIME = 306,
 
   TIFFTAG_SAMPLEFORMAT = 339,
 
@@ -164,23 +166,301 @@ struct IFDTag {
 };
 // 12 bytes.
 
-class DNGImage {
- public:
-  DNGImage();
-  ~DNGImage() {}
+// From tiff.h
+typedef enum {
+  TIFF_NOTYPE = 0,     /* placeholder */
+  TIFF_BYTE = 1,       /* 8-bit unsigned integer */
+  TIFF_ASCII = 2,      /* 8-bit bytes w/ last byte null */
+  TIFF_SHORT = 3,      /* 16-bit unsigned integer */
+  TIFF_LONG = 4,       /* 32-bit unsigned integer */
+  TIFF_RATIONAL = 5,   /* 64-bit unsigned fraction */
+  TIFF_SBYTE = 6,      /* !8-bit signed integer */
+  TIFF_UNDEFINED = 7,  /* !8-bit untyped data */
+  TIFF_SSHORT = 8,     /* !16-bit signed integer */
+  TIFF_SLONG = 9,      /* !32-bit signed integer */
+  TIFF_SRATIONAL = 10, /* !64-bit signed fraction */
+  TIFF_FLOAT = 11,     /* !32-bit IEEE floating point */
+  TIFF_DOUBLE = 12,    /* !64-bit IEEE floating point */
+  TIFF_IFD = 13,       /* %32-bit unsigned integer (offset) */
+  TIFF_LONG8 = 16,     /* BigTIFF 64-bit unsigned integer */
+  TIFF_SLONG8 = 17,    /* BigTIFF 64-bit signed integer */
+  TIFF_IFD8 = 18       /* BigTIFF 64-bit unsigned integer (offset) */
+} DataType;
 
-  ///
-  /// Optional: Explicitly specify endian.
-  /// Must be called before calling other Set methods.
-  ///
-  void SetBigEndian(bool big_endian);
+const static int kHeaderSize = 8;  // TIFF header size.
 
-  ///
-  /// Default = 0
-  ///
-  bool SetSubfileType(bool reduced_image = false, bool page = false,
-                      bool mask = false);
+static bool WriteTIFFTag(const unsigned short tag, const unsigned short type,
+                         const unsigned int count, const unsigned char *data,
+                         std::vector<IFDTag> *tags_out,
+                         std::ostringstream *data_out) {
+  assert(sizeof(IFDTag) ==
+         12);  // FIXME(syoyo): Use static_assert for C++11 compiler
 
+  IFDTag ifd;
+  ifd.tag = tag;
+  ifd.type = type;
+  ifd.count = count;
+
+  size_t typesize_table[] = {1, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4};
+
+  size_t len = count * (typesize_table[(type) < 14 ? (type) : 0]);
+  if (len > 4) {
+    assert(data_out);
+    if (!data_out) {
+      return false;
+    }
+
+    // Store offset value.
+
+    unsigned int offset =
+        static_cast<unsigned int>(data_out->tellp()) + kHeaderSize;
+    ifd.offset_or_value = offset;
+
+    data_out->write(reinterpret_cast<const char *>(data),
+                    static_cast<std::streamsize>(len));
+
+  } else {
+    ifd.offset_or_value = 0;
+
+    // less than 4 bytes = store data itself.
+    if (len == 1) {
+      unsigned char value = *(data);
+      memcpy(&(ifd.offset_or_value), &value, sizeof(unsigned char));
+    } else if (len == 2) {
+      unsigned short value = *(reinterpret_cast<const unsigned short *>(data));
+      memcpy(&(ifd.offset_or_value), &value, sizeof(unsigned short));
+    } else if (len == 4) {
+      unsigned int value = *(reinterpret_cast<const unsigned int *>(data));
+      ifd.offset_or_value = value;
+    } else {
+      assert(0);
+    }
+  }
+
+  tags_out->push_back(ifd);
+
+  return true;
+}
+
+static void swap2(unsigned short *val) {
+  uint16_t tmp = *(uint16_t*)val;
+  unsigned char *dst = reinterpret_cast<unsigned char *>(val);
+  unsigned char *src = reinterpret_cast<unsigned char *>(&tmp);
+
+  dst[0] = src[1];
+  dst[1] = src[0];
+}
+
+static void swap4(void *val) {
+  uint32_t tmp = *(uint32_t*)val;
+  unsigned char *dst = reinterpret_cast<unsigned char *>(val);
+  unsigned char *src = reinterpret_cast<unsigned char *>(&tmp);
+
+  dst[0] = src[3];
+  dst[1] = src[2];
+  dst[2] = src[1];
+  dst[3] = src[0];
+}
+
+static void swap8(uint64_t *val) {
+  uint64_t tmp = *(uint64_t*)val;
+  unsigned char *dst = reinterpret_cast<unsigned char *>(val);
+  unsigned char *src = reinterpret_cast<unsigned char *>(&tmp);
+
+  dst[0] = src[7];
+  dst[1] = src[6];
+  dst[2] = src[5];
+  dst[3] = src[4];
+  dst[4] = src[3];
+  dst[5] = src[2];
+  dst[6] = src[1];
+  dst[7] = src[0];
+}
+
+
+static void Write1(const unsigned char c, std::ostringstream *out) {
+  unsigned char value = c;
+  out->write(reinterpret_cast<const char *>(&value), 1);
+}
+
+static void Write2(const unsigned short c, std::ostringstream *out,
+                   const bool swap_endian) {
+  unsigned short value = c;
+  if (swap_endian) {
+    swap2(&value);
+  }
+
+  out->write(reinterpret_cast<const char *>(&value), 2);
+}
+
+static void Write4(const unsigned int c, std::ostringstream *out,
+                   const bool swap_endian) {
+  unsigned int value = c;
+  if (swap_endian) {
+    swap4(&value);
+  }
+
+  out->write(reinterpret_cast<const char *>(&value), 4);
+}
+
+static bool WriteTIFFVersionHeader(std::ostringstream *out, bool big_endian) {
+  // TODO(syoyo): Support BigTIFF?
+
+  // 4d 4d = Big endian. 49 49 = Little endian.
+  if (big_endian) {
+    Write1(0x4d, out);
+    Write1(0x4d, out);
+    Write1(0x0, out);
+    Write1(0x2a, out);  // Tiff version ID
+  } else {
+    Write1(0x49, out);
+    Write1(0x49, out);
+    Write1(0x2a, out);  // Tiff version ID
+    Write1(0x0, out);
+  }
+
+  return true;
+}
+
+struct IFD {
+    bool SetSubfileType(bool reduced_image=false, bool page=false, bool mask=false) {
+      unsigned int count = 1;
+
+      unsigned int bits = 0;
+      if (reduced_image) {
+        bits |= FILETYPE_REDUCEDIMAGE;
+      }
+      if (page) {
+        bits |= FILETYPE_PAGE;
+      }
+      if (mask) {
+        bits |= FILETYPE_MASK;
+      }
+
+      bool ret = WriteTIFFTag(
+          static_cast<unsigned short>(TIFFTAG_SUB_FILETYPE), TIFF_LONG, count,
+          reinterpret_cast<const unsigned char *>(&bits), &ifd_tags_, &data_os_);
+
+      if (!ret) {
+        return false;
+      }
+
+      num_fields_++;
+      return true;
+    }
+    
+    ///
+    /// Optional: Explicitly specify endian.
+    /// Must be called before calling other Set methods.
+    ///
+    void SetBigEndian(bool big_endian) {
+    }
+    
+    static bool IFDComparator(const IFDTag &a, const IFDTag &b) {
+        return (a.tag < b.tag);
+    }
+
+    ///
+    /// Write IFD to stream.
+    ///
+    /// @param[in] data_base_offset : Byte offset to data
+    /// @param[in] strip_offset : Byte offset to image strip data
+    ///
+    /// TODO(syoyo): Support multiple strips
+    ///
+    bool WriteIFDToStream(const unsigned int data_base_offset,
+                                    const unsigned int strip_offset,
+                                    std::ostream *ofs) const {
+      if ((num_fields_ == 0) || (ifd_tags_.size() < 1)) {
+        err_ += "No TIFF Tags.\n";
+        return false;
+      }
+
+      // add STRIP_OFFSET tag and sort IFD tags.
+      std::vector<IFDTag> tags = ifd_tags_;
+      {
+        // For STRIP_OFFSET we need the actual offset value to data(image),
+        // thus write STRIP_OFFSET here.
+        unsigned int offset = strip_offset + kHeaderSize;
+        IFDTag ifd;
+        ifd.tag = TIFFTAG_STRIP_OFFSET;
+        ifd.type = TIFF_LONG;
+        ifd.count = 1;
+        ifd.offset_or_value = offset;
+        tags.push_back(ifd);
+      }
+
+      // TIFF expects IFD tags are sorted.
+      std::sort(tags.begin(), tags.end(), IFDComparator);
+
+      std::ostringstream ifd_os;
+
+      unsigned short num_fields = static_cast<unsigned short>(tags.size());
+
+      Write2(num_fields, &ifd_os, swap_endian_);
+
+      {
+        size_t typesize_table[] = {1, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4};
+
+        for (size_t i = 0; i < tags.size(); i++) {
+          const IFDTag &ifd = tags[i];
+          Write2(ifd.tag, &ifd_os, swap_endian_);
+          Write2(ifd.type, &ifd_os, swap_endian_);
+          Write4(ifd.count, &ifd_os, swap_endian_);
+
+          size_t len =
+              ifd.count * (typesize_table[(ifd.type) < 14 ? (ifd.type) : 0]);
+          if (len > 4) {
+            // Store offset value.
+            unsigned int ifd_offt = ifd.offset_or_value + data_base_offset;
+            Write4(ifd_offt, &ifd_os, swap_endian_);
+          } else {
+            // less than 4 bytes = store data itself.
+
+            if (len == 1) {
+              const unsigned char value =
+                  *(reinterpret_cast<const unsigned char *>(&ifd.offset_or_value));
+              Write1(value, &ifd_os);
+              unsigned char pad = 0;
+              Write1(pad, &ifd_os);
+              Write1(pad, &ifd_os);
+              Write1(pad, &ifd_os);
+            } else if (len == 2) {
+              const unsigned short value =
+                  *(reinterpret_cast<const unsigned short *>(&ifd.offset_or_value));
+              Write2(value, &ifd_os, swap_endian_);
+              const unsigned short pad = 0;
+              Write2(pad, &ifd_os, swap_endian_);
+            } else if (len == 4) {
+              const unsigned int value =
+                  *(reinterpret_cast<const unsigned int *>(&ifd.offset_or_value));
+              Write4(value, &ifd_os, swap_endian_);
+            } else {
+              assert(0);
+            }
+          }
+        }
+
+        ofs->write(ifd_os.str().c_str(),
+                   static_cast<std::streamsize>(ifd_os.str().length()));
+      }
+
+      return true;
+    }
+
+  std::string Error() const { return err_; }
+  
+  std::ostringstream data_os_;
+  bool swap_endian_ = false;
+  bool big_endian_ = true;
+  unsigned short num_fields_ = 0;
+  mutable std::string err_;  // Error message
+
+  std::vector<IFDTag> ifd_tags_;
+  
+};
+
+struct DNGImage : IFD {
   bool SetImageWidth(unsigned int value);
   bool SetImageLength(unsigned int value);
   bool SetRowsPerStrip(unsigned int value);
@@ -215,6 +495,12 @@ class DNGImage {
   /// Currently we limit to 4095 chars at max.
   ///
   bool SetSoftware(const std::string &ascii);
+
+  ///
+  /// Set date and time of image creation.
+  /// Currently we limit to 4095 chars at max.
+  ///
+  bool SetDateTime(const std::string &ascii);
 
   bool SetActiveArea(const unsigned int values[4]);
 
@@ -289,46 +575,87 @@ class DNGImage {
 
   size_t GetStripOffset() const { return data_strip_offset_; }
   size_t GetStripBytes() const { return data_strip_bytes_; }
+  
+    /// Write aux IFD data and strip image data to stream.
+    bool WriteDataToStream(std::ostream *ofs) const {
+      if ((data_os_.str().length() == 0)) {
+        err_ += "Empty IFD data and image data.\n";
+        return false;
+      }
 
-  /// Write aux IFD data and strip image data to stream.
-  bool WriteDataToStream(std::ostream *ofs) const;
+      if (bits_per_samples_.empty()) {
+        err_ += "BitsPerSample is not set\n";
+        return false;
+      }
 
-  ///
-  /// Write IFD to stream.
-  ///
-  /// @param[in] data_base_offset : Byte offset to data
-  /// @param[in] strip_offset : Byte offset to image strip data
-  ///
-  /// TODO(syoyo): Support multiple strips
-  ///
-  bool WriteIFDToStream(const unsigned int data_base_offset,
-                        const unsigned int strip_offset, std::ostream *ofs) const;
+      for (size_t i = 0; i < bits_per_samples_.size(); i++) {
+        if (bits_per_samples_[i] == 0) {
+          err_ += std::to_string(i) + "'th BitsPerSample is zero";
+          return false;
+        }
+      }
 
-  std::string Error() const { return err_; }
+      if (samples_per_pixels_ == 0) {
+        err_ += "SamplesPerPixels is not set or zero.";
+        return false;
+      }
 
- private:
-  std::ostringstream data_os_;
-  bool swap_endian_;
-  bool dng_big_endian_;
-  unsigned short num_fields_;
-  unsigned int samples_per_pixels_;
+      std::vector<uint8_t> data(data_os_.str().length());
+      memcpy(data.data(), data_os_.str().data(), data.size());
+
+      if (data_strip_bytes_ == 0) {
+        // May ok?.
+      } else {
+        // FIXME(syoyo): Assume all channels use sample bps
+        uint32_t bps = bits_per_samples_[0];
+
+        // We may need to swap endian for pixel data.
+        if (swap_endian_) {
+          if (bps == 16) {
+            size_t n = data_strip_bytes_ / sizeof(uint16_t);
+            uint16_t *ptr =
+                reinterpret_cast<uint16_t *>(data.data() + data_strip_offset_);
+
+            for (size_t i = 0; i < n; i++) {
+              swap2(&ptr[i]);
+            }
+
+          } else if (bps == 32) {
+            size_t n = data_strip_bytes_ / sizeof(uint32_t);
+            uint32_t *ptr =
+                reinterpret_cast<uint32_t *>(data.data() + data_strip_offset_);
+
+            for (size_t i = 0; i < n; i++) {
+              swap4(&ptr[i]);
+            }
+
+          } else if (bps == 64) {
+            size_t n = data_strip_bytes_ / sizeof(uint64_t);
+            uint64_t *ptr =
+                reinterpret_cast<uint64_t *>(data.data() + data_strip_offset_);
+
+            for (size_t i = 0; i < n; i++) {
+              swap8(&ptr[i]);
+            }
+          }
+        }
+      }
+
+      ofs->write(reinterpret_cast<const char *>(data.data()),
+                 static_cast<std::streamsize>(data.size()));
+
+      return true;
+    }
+
+  unsigned int samples_per_pixels_ = 0;
   std::vector<unsigned short> bits_per_samples_;
 
   // TODO(syoyo): Support multiple strips
-  size_t data_strip_offset_{0};
-  size_t data_strip_bytes_{0};
-
-  mutable std::string err_;  // Error message
-
-  std::vector<IFDTag> ifd_tags_;
+  size_t data_strip_offset_ = 0;
+  size_t data_strip_bytes_ = 0;
 };
 
-class DNGWriter {
- public:
-  // TODO(syoyo): Use same endian setting with DNGImage.
-  DNGWriter(bool big_endian);
-  ~DNGWriter() {}
-
+struct DNGWriter {
   ///
   /// Add DNGImage.
   /// It just retains the pointer of the image, thus
@@ -345,9 +672,8 @@ class DNGWriter {
   /// Returns true upon success.
   bool WriteToFile(const char *filename, std::string *err) const;
 
- private:
-  bool swap_endian_;
-  bool dng_big_endian_;  // Endianness of DNG file.
+  bool swap_endian_ = false;
+  bool big_endian_ = false;  // Endianness of DNG file.
 
   std::vector<const DNGImage *> images_;
 };
@@ -991,29 +1317,6 @@ int lj92_encode(uint16_t *image, int width, int height, int bitdepth,
 // +----------------------+
 //
 
-// From tiff.h
-typedef enum {
-  TIFF_NOTYPE = 0,     /* placeholder */
-  TIFF_BYTE = 1,       /* 8-bit unsigned integer */
-  TIFF_ASCII = 2,      /* 8-bit bytes w/ last byte null */
-  TIFF_SHORT = 3,      /* 16-bit unsigned integer */
-  TIFF_LONG = 4,       /* 32-bit unsigned integer */
-  TIFF_RATIONAL = 5,   /* 64-bit unsigned fraction */
-  TIFF_SBYTE = 6,      /* !8-bit signed integer */
-  TIFF_UNDEFINED = 7,  /* !8-bit untyped data */
-  TIFF_SSHORT = 8,     /* !16-bit signed integer */
-  TIFF_SLONG = 9,      /* !32-bit signed integer */
-  TIFF_SRATIONAL = 10, /* !64-bit signed fraction */
-  TIFF_FLOAT = 11,     /* !32-bit IEEE floating point */
-  TIFF_DOUBLE = 12,    /* !64-bit IEEE floating point */
-  TIFF_IFD = 13,       /* %32-bit unsigned integer (offset) */
-  TIFF_LONG8 = 16,     /* BigTIFF 64-bit unsigned integer */
-  TIFF_SLONG8 = 17,    /* BigTIFF 64-bit signed integer */
-  TIFF_IFD8 = 18       /* BigTIFF 64-bit unsigned integer (offset) */
-} DataType;
-
-const static int kHeaderSize = 8;  // TIFF header size.
-
 // floating point to integer rational value conversion
 // https://stackoverflow.com/questions/51142275/exact-value-of-a-floating-point-number-as-a-rational
 //
@@ -1074,178 +1377,6 @@ static inline bool IsBigEndian() {
   char c[4];
   memcpy(c, &i, 4);
   return (c[0] == 1);
-}
-
-static void swap2(unsigned short *val) {
-  uint16_t tmp = *(uint16_t*)val;
-  unsigned char *dst = reinterpret_cast<unsigned char *>(val);
-  unsigned char *src = reinterpret_cast<unsigned char *>(&tmp);
-
-  dst[0] = src[1];
-  dst[1] = src[0];
-}
-
-static void swap4(void *val) {
-  uint32_t tmp = *(uint32_t*)val;
-  unsigned char *dst = reinterpret_cast<unsigned char *>(val);
-  unsigned char *src = reinterpret_cast<unsigned char *>(&tmp);
-
-  dst[0] = src[3];
-  dst[1] = src[2];
-  dst[2] = src[1];
-  dst[3] = src[0];
-}
-
-static void swap8(uint64_t *val) {
-  uint64_t tmp = *(uint64_t*)val;
-  unsigned char *dst = reinterpret_cast<unsigned char *>(val);
-  unsigned char *src = reinterpret_cast<unsigned char *>(&tmp);
-
-  dst[0] = src[7];
-  dst[1] = src[6];
-  dst[2] = src[5];
-  dst[3] = src[4];
-  dst[4] = src[3];
-  dst[5] = src[2];
-  dst[6] = src[1];
-  dst[7] = src[0];
-}
-
-static void Write1(const unsigned char c, std::ostringstream *out) {
-  unsigned char value = c;
-  out->write(reinterpret_cast<const char *>(&value), 1);
-}
-
-static void Write2(const unsigned short c, std::ostringstream *out,
-                   const bool swap_endian) {
-  unsigned short value = c;
-  if (swap_endian) {
-    swap2(&value);
-  }
-
-  out->write(reinterpret_cast<const char *>(&value), 2);
-}
-
-static void Write4(const unsigned int c, std::ostringstream *out,
-                   const bool swap_endian) {
-  unsigned int value = c;
-  if (swap_endian) {
-    swap4(&value);
-  }
-
-  out->write(reinterpret_cast<const char *>(&value), 4);
-}
-
-static bool WriteTIFFTag(const unsigned short tag, const unsigned short type,
-                         const unsigned int count, const unsigned char *data,
-                         std::vector<IFDTag> *tags_out,
-                         std::ostringstream *data_out) {
-  assert(sizeof(IFDTag) ==
-         12);  // FIXME(syoyo): Use static_assert for C++11 compiler
-
-  IFDTag ifd;
-  ifd.tag = tag;
-  ifd.type = type;
-  ifd.count = count;
-
-  size_t typesize_table[] = {1, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4};
-
-  size_t len = count * (typesize_table[(type) < 14 ? (type) : 0]);
-  if (len > 4) {
-    assert(data_out);
-    if (!data_out) {
-      return false;
-    }
-
-    // Store offset value.
-
-    unsigned int offset =
-        static_cast<unsigned int>(data_out->tellp()) + kHeaderSize;
-    ifd.offset_or_value = offset;
-
-    data_out->write(reinterpret_cast<const char *>(data),
-                    static_cast<std::streamsize>(len));
-
-  } else {
-    ifd.offset_or_value = 0;
-
-    // less than 4 bytes = store data itself.
-    if (len == 1) {
-      unsigned char value = *(data);
-      memcpy(&(ifd.offset_or_value), &value, sizeof(unsigned char));
-    } else if (len == 2) {
-      unsigned short value = *(reinterpret_cast<const unsigned short *>(data));
-      memcpy(&(ifd.offset_or_value), &value, sizeof(unsigned short));
-    } else if (len == 4) {
-      unsigned int value = *(reinterpret_cast<const unsigned int *>(data));
-      ifd.offset_or_value = value;
-    } else {
-      assert(0);
-    }
-  }
-
-  tags_out->push_back(ifd);
-
-  return true;
-}
-
-static bool WriteTIFFVersionHeader(std::ostringstream *out, bool big_endian) {
-  // TODO(syoyo): Support BigTIFF?
-
-  // 4d 4d = Big endian. 49 49 = Little endian.
-  if (big_endian) {
-    Write1(0x4d, out);
-    Write1(0x4d, out);
-    Write1(0x0, out);
-    Write1(0x2a, out);  // Tiff version ID
-  } else {
-    Write1(0x49, out);
-    Write1(0x49, out);
-    Write1(0x2a, out);  // Tiff version ID
-    Write1(0x0, out);
-  }
-
-  return true;
-}
-
-DNGImage::DNGImage()
-    : dng_big_endian_(true),
-      num_fields_(0),
-      samples_per_pixels_(0),
-      data_strip_offset_{0},
-      data_strip_bytes_{0} {
-  swap_endian_ = (IsBigEndian() != dng_big_endian_);
-}
-
-void DNGImage::SetBigEndian(bool big_endian) {
-  dng_big_endian_ = big_endian;
-  swap_endian_ = (IsBigEndian() != dng_big_endian_);
-}
-
-bool DNGImage::SetSubfileType(bool reduced_image, bool page, bool mask) {
-  unsigned int count = 1;
-
-  unsigned int bits = 0;
-  if (reduced_image) {
-    bits |= FILETYPE_REDUCEDIMAGE;
-  }
-  if (page) {
-    bits |= FILETYPE_PAGE;
-  }
-  if (mask) {
-    bits |= FILETYPE_MASK;
-  }
-
-  bool ret = WriteTIFFTag(
-      static_cast<unsigned short>(TIFFTAG_SUB_FILETYPE), TIFF_LONG, count,
-      reinterpret_cast<const unsigned char *>(&bits), &ifd_tags_, &data_os_);
-
-  if (!ret) {
-    return false;
-  }
-
-  num_fields_++;
-  return true;
 }
 
 bool DNGImage::SetImageWidth(const unsigned int width) {
@@ -1787,6 +1918,33 @@ bool DNGImage::SetSoftware(const std::string &ascii) {
   }
 
   bool ret = WriteTIFFTag(static_cast<unsigned short>(TIFFTAG_SOFTWARE),
+                          TIFF_ASCII, count,
+                          reinterpret_cast<const unsigned char *>(ascii.data()),
+                          &ifd_tags_, &data_os_);
+
+  if (!ret) {
+    return false;
+  }
+
+  num_fields_++;
+  return true;
+}
+
+bool DNGImage::SetDateTime(const std::string &ascii) {
+  unsigned int count =
+      static_cast<unsigned int>(ascii.length() + 1);  // +1 for '\0'
+
+  if (count < 2) {
+    // empty string
+    return false;
+  }
+
+  if (count > 4096) {
+    // too large
+    return false;
+  }
+
+  bool ret = WriteTIFFTag(static_cast<unsigned short>(TIFFTAG_DATETIME),
                           TIFF_ASCII, count,
                           reinterpret_cast<const unsigned char *>(ascii.data()),
                           &ifd_tags_, &data_os_);
@@ -2388,165 +2546,7 @@ bool DNGImage::SetCustomFieldULong(const unsigned short tag,
   return true;
 }
 
-static bool IFDComparator(const IFDTag &a, const IFDTag &b) {
-  return (a.tag < b.tag);
-}
-
-bool DNGImage::WriteDataToStream(std::ostream *ofs) const {
-  if ((data_os_.str().length() == 0)) {
-    err_ += "Empty IFD data and image data.\n";
-    return false;
-  }
-
-  if (bits_per_samples_.empty()) {
-    err_ += "BitsPerSample is not set\n";
-    return false;
-  }
-
-  for (size_t i = 0; i < bits_per_samples_.size(); i++) {
-    if (bits_per_samples_[i] == 0) {
-      err_ += std::to_string(i) + "'th BitsPerSample is zero";
-      return false;
-    }
-  }
-
-  if (samples_per_pixels_ == 0) {
-    err_ += "SamplesPerPixels is not set or zero.";
-    return false;
-  }
-
-  std::vector<uint8_t> data(data_os_.str().length());
-  memcpy(data.data(), data_os_.str().data(), data.size());
-
-  if (data_strip_bytes_ == 0) {
-    // May ok?.
-  } else {
-    // FIXME(syoyo): Assume all channels use sample bps
-    uint32_t bps = bits_per_samples_[0];
-
-    // We may need to swap endian for pixel data.
-    if (swap_endian_) {
-      if (bps == 16) {
-        size_t n = data_strip_bytes_ / sizeof(uint16_t);
-        uint16_t *ptr =
-            reinterpret_cast<uint16_t *>(data.data() + data_strip_offset_);
-
-        for (size_t i = 0; i < n; i++) {
-          swap2(&ptr[i]);
-        }
-
-      } else if (bps == 32) {
-        size_t n = data_strip_bytes_ / sizeof(uint32_t);
-        uint32_t *ptr =
-            reinterpret_cast<uint32_t *>(data.data() + data_strip_offset_);
-
-        for (size_t i = 0; i < n; i++) {
-          swap4(&ptr[i]);
-        }
-
-      } else if (bps == 64) {
-        size_t n = data_strip_bytes_ / sizeof(uint64_t);
-        uint64_t *ptr =
-            reinterpret_cast<uint64_t *>(data.data() + data_strip_offset_);
-
-        for (size_t i = 0; i < n; i++) {
-          swap8(&ptr[i]);
-        }
-      }
-    }
-  }
-
-  ofs->write(reinterpret_cast<const char *>(data.data()),
-             static_cast<std::streamsize>(data.size()));
-
-  return true;
-}
-
-bool DNGImage::WriteIFDToStream(const unsigned int data_base_offset,
-                                const unsigned int strip_offset,
-                                std::ostream *ofs) const {
-  if ((num_fields_ == 0) || (ifd_tags_.size() < 1)) {
-    err_ += "No TIFF Tags.\n";
-    return false;
-  }
-
-  // add STRIP_OFFSET tag and sort IFD tags.
-  std::vector<IFDTag> tags = ifd_tags_;
-  {
-    // For STRIP_OFFSET we need the actual offset value to data(image),
-    // thus write STRIP_OFFSET here.
-    unsigned int offset = strip_offset + kHeaderSize;
-    IFDTag ifd;
-    ifd.tag = TIFFTAG_STRIP_OFFSET;
-    ifd.type = TIFF_LONG;
-    ifd.count = 1;
-    ifd.offset_or_value = offset;
-    tags.push_back(ifd);
-  }
-
-  // TIFF expects IFD tags are sorted.
-  std::sort(tags.begin(), tags.end(), IFDComparator);
-
-  std::ostringstream ifd_os;
-
-  unsigned short num_fields = static_cast<unsigned short>(tags.size());
-
-  Write2(num_fields, &ifd_os, swap_endian_);
-
-  {
-    size_t typesize_table[] = {1, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8, 4};
-
-    for (size_t i = 0; i < tags.size(); i++) {
-      const IFDTag &ifd = tags[i];
-      Write2(ifd.tag, &ifd_os, swap_endian_);
-      Write2(ifd.type, &ifd_os, swap_endian_);
-      Write4(ifd.count, &ifd_os, swap_endian_);
-
-      size_t len =
-          ifd.count * (typesize_table[(ifd.type) < 14 ? (ifd.type) : 0]);
-      if (len > 4) {
-        // Store offset value.
-        unsigned int ifd_offt = ifd.offset_or_value + data_base_offset;
-        Write4(ifd_offt, &ifd_os, swap_endian_);
-      } else {
-        // less than 4 bytes = store data itself.
-
-        if (len == 1) {
-          const unsigned char value =
-              *(reinterpret_cast<const unsigned char *>(&ifd.offset_or_value));
-          Write1(value, &ifd_os);
-          unsigned char pad = 0;
-          Write1(pad, &ifd_os);
-          Write1(pad, &ifd_os);
-          Write1(pad, &ifd_os);
-        } else if (len == 2) {
-          const unsigned short value =
-              *(reinterpret_cast<const unsigned short *>(&ifd.offset_or_value));
-          Write2(value, &ifd_os, swap_endian_);
-          const unsigned short pad = 0;
-          Write2(pad, &ifd_os, swap_endian_);
-        } else if (len == 4) {
-          const unsigned int value =
-              *(reinterpret_cast<const unsigned int *>(&ifd.offset_or_value));
-          Write4(value, &ifd_os, swap_endian_);
-        } else {
-          assert(0);
-        }
-      }
-    }
-
-    ofs->write(ifd_os.str().c_str(),
-               static_cast<std::streamsize>(ifd_os.str().length()));
-  }
-
-  return true;
-}
-
 // -------------------------------------------
-
-DNGWriter::DNGWriter(bool big_endian) : dng_big_endian_(big_endian) {
-  swap_endian_ = (IsBigEndian() != dng_big_endian_);
-}
 
 bool DNGWriter::WriteToFile(const char *filename, std::string *err) const {
   std::ofstream ofs(filename, std::ostream::binary);
@@ -2560,7 +2560,7 @@ bool DNGWriter::WriteToFile(const char *filename, std::string *err) const {
   }
 
   std::ostringstream header;
-  bool ret = WriteTIFFVersionHeader(&header, dng_big_endian_);
+  bool ret = WriteTIFFVersionHeader(&header, big_endian_);
   if (!ret) {
     if (err) {
       (*err) = "Failed to write TIFF version header.\n";
