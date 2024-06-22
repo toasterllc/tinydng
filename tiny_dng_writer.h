@@ -59,7 +59,6 @@ typedef enum {
   TIFFTAG_RESOLUTION_UNIT = 296,
 
   TIFFTAG_SOFTWARE = 305,
-  TIFFTAG_DATETIME = 306,
 
   TIFFTAG_SAMPLEFORMAT = 339,
 
@@ -67,6 +66,11 @@ typedef enum {
   TIFFTAG_CFA_REPEAT_PATTERN_DIM = 33421,
   TIFFTAG_CFA_PATTERN = 33422,
 
+  // EXIF
+  TIFFTAG_EXIFIFD = 34665,
+  TIFFTAG_DATETIME = 36867,
+
+  // DNG tags
   TIFFTAG_DNG_VERSION = 50706,
   TIFFTAG_DNG_BACKWARD_VERSION = 50707,
   TIFFTAG_UNIQUE_CAMERA_MODEL = 50708,
@@ -323,6 +327,7 @@ static bool WriteTIFFVersionHeader(std::ostringstream *out, bool big_endian) {
 }
 
 struct IFD {
+    virtual ~IFD() {}
     bool SetSubfileType(bool reduced_image=false, bool page=false, bool mask=false) {
       unsigned int count = 1;
 
@@ -368,27 +373,18 @@ struct IFD {
     ///
     /// TODO(syoyo): Support multiple strips
     ///
-    bool WriteIFDToStream(const unsigned int data_base_offset,
-                                    const unsigned int strip_offset,
-                                    std::ostream *ofs) const {
+    virtual bool WriteIFDToStream(const unsigned int data_base_offset,
+                          const unsigned int strip_offset,
+                          std::vector<IFDTag> add_tags,
+                          std::ostream *ofs) const {
       if ((num_fields_ == 0) || (ifd_tags_.size() < 1)) {
         err_ += "No TIFF Tags.\n";
         return false;
       }
 
-      // add STRIP_OFFSET tag and sort IFD tags.
+      // collect and sort IFD tags.
       std::vector<IFDTag> tags = ifd_tags_;
-      {
-        // For STRIP_OFFSET we need the actual offset value to data(image),
-        // thus write STRIP_OFFSET here.
-        unsigned int offset = strip_offset + kHeaderSize;
-        IFDTag ifd;
-        ifd.tag = TIFFTAG_STRIP_OFFSET;
-        ifd.type = TIFF_LONG;
-        ifd.count = 1;
-        ifd.offset_or_value = offset;
-        tags.push_back(ifd);
-      }
+      tags.insert(tags.end(), add_tags.begin(), add_tags.end());
 
       // TIFF expects IFD tags are sorted.
       std::sort(tags.begin(), tags.end(), IFDComparator);
@@ -447,8 +443,20 @@ struct IFD {
 
       return true;
     }
+    
+    /// Write aux IFD data and strip image data to stream.
+    bool WriteDataToStream(std::ostream *ofs) const {
+      const auto data = data_os_.str();
+      ofs->write(reinterpret_cast<const char *>(data.data()),
+                 static_cast<std::streamsize>(data.size()));
+
+      return true;
+    }
 
   std::string Error() const { return err_; }
+  
+  size_t GetDataSize() const { return data_os_.str().length(); }
+  virtual size_t GetStripOffset() const { return 0; }
   
   std::ostringstream data_os_;
   bool swap_endian_ = false;
@@ -495,12 +503,6 @@ struct DNGImage : IFD {
   /// Currently we limit to 4095 chars at max.
   ///
   bool SetSoftware(const std::string &ascii);
-
-  ///
-  /// Set date and time of image creation.
-  /// Currently we limit to 4095 chars at max.
-  ///
-  bool SetDateTime(const std::string &ascii);
 
   bool SetActiveArea(const unsigned int values[4]);
 
@@ -571,81 +573,100 @@ struct DNGImage : IFD {
   bool SetCustomFieldLong(const unsigned short tag, const int value);
   bool SetCustomFieldULong(const unsigned short tag, const unsigned int value);
 
-  size_t GetDataSize() const { return data_os_.str().length(); }
-
-  size_t GetStripOffset() const { return data_strip_offset_; }
-  size_t GetStripBytes() const { return data_strip_bytes_; }
+  virtual size_t GetStripOffset() const override { return data_strip_offset_; }
   
-    /// Write aux IFD data and strip image data to stream.
-    bool WriteDataToStream(std::ostream *ofs) const {
-      if ((data_os_.str().length() == 0)) {
-        err_ += "Empty IFD data and image data.\n";
-        return false;
+  bool WriteIFDToStream(const unsigned int data_base_offset,
+                        const unsigned int strip_offset,
+                        std::vector<IFDTag> add_tags,
+                        std::ostream *ofs) const override {
+      // add STRIP_OFFSET tag and sort IFD tags.
+      {
+          // For STRIP_OFFSET we need the actual offset value to data(image),
+          // thus write STRIP_OFFSET here.
+          unsigned int offset = strip_offset + kHeaderSize;
+          IFDTag ifd;
+          ifd.tag = TIFFTAG_STRIP_OFFSET;
+          ifd.type = TIFF_LONG;
+          ifd.count = 1;
+          ifd.offset_or_value = offset;
+          add_tags.push_back(ifd);
       }
-
-      if (bits_per_samples_.empty()) {
-        err_ += "BitsPerSample is not set\n";
-        return false;
-      }
-
-      for (size_t i = 0; i < bits_per_samples_.size(); i++) {
-        if (bits_per_samples_[i] == 0) {
-          err_ += std::to_string(i) + "'th BitsPerSample is zero";
-          return false;
-        }
-      }
-
-      if (samples_per_pixels_ == 0) {
-        err_ += "SamplesPerPixels is not set or zero.";
-        return false;
-      }
-
-      std::vector<uint8_t> data(data_os_.str().length());
-      memcpy(data.data(), data_os_.str().data(), data.size());
-
-      if (data_strip_bytes_ == 0) {
-        // May ok?.
-      } else {
-        // FIXME(syoyo): Assume all channels use sample bps
-        uint32_t bps = bits_per_samples_[0];
-
-        // We may need to swap endian for pixel data.
-        if (swap_endian_) {
-          if (bps == 16) {
-            size_t n = data_strip_bytes_ / sizeof(uint16_t);
-            uint16_t *ptr =
-                reinterpret_cast<uint16_t *>(data.data() + data_strip_offset_);
-
-            for (size_t i = 0; i < n; i++) {
-              swap2(&ptr[i]);
-            }
-
-          } else if (bps == 32) {
-            size_t n = data_strip_bytes_ / sizeof(uint32_t);
-            uint32_t *ptr =
-                reinterpret_cast<uint32_t *>(data.data() + data_strip_offset_);
-
-            for (size_t i = 0; i < n; i++) {
-              swap4(&ptr[i]);
-            }
-
-          } else if (bps == 64) {
-            size_t n = data_strip_bytes_ / sizeof(uint64_t);
-            uint64_t *ptr =
-                reinterpret_cast<uint64_t *>(data.data() + data_strip_offset_);
-
-            for (size_t i = 0; i < n; i++) {
-              swap8(&ptr[i]);
-            }
-          }
-        }
-      }
-
-      ofs->write(reinterpret_cast<const char *>(data.data()),
-                 static_cast<std::streamsize>(data.size()));
-
-      return true;
-    }
+      
+      return IFD::WriteIFDToStream(data_base_offset, strip_offset, add_tags, ofs);
+  }
+  
+//    /// Write aux IFD data and strip image data to stream.
+//    bool WriteDataToStream(std::ostream *ofs) const {
+//      if ((data_os_.str().length() == 0)) {
+//        err_ += "Empty IFD data and image data.\n";
+//        return false;
+//      }
+//
+//      if (bits_per_samples_.empty()) {
+//        err_ += "BitsPerSample is not set\n";
+//        return false;
+//      }
+//
+//      for (size_t i = 0; i < bits_per_samples_.size(); i++) {
+//        if (bits_per_samples_[i] == 0) {
+//          err_ += std::to_string(i) + "'th BitsPerSample is zero";
+//          return false;
+//        }
+//      }
+//
+//      if (samples_per_pixels_ == 0) {
+//        err_ += "SamplesPerPixels is not set or zero.";
+//        return false;
+//      }
+//      
+//      
+//
+//      std::vector<uint8_t> data(data_os_.str().length());
+//      memcpy(data.data(), data_os_.str().data(), data.size());
+//
+//      if (data_strip_bytes_ == 0) {
+//        // May ok?.
+//      } else {
+//        // FIXME(syoyo): Assume all channels use sample bps
+//        uint32_t bps = bits_per_samples_[0];
+//
+//        // We may need to swap endian for pixel data.
+//        if (swap_endian_) {
+//          if (bps == 16) {
+//            size_t n = data_strip_bytes_ / sizeof(uint16_t);
+//            uint16_t *ptr =
+//                reinterpret_cast<uint16_t *>(data.data() + data_strip_offset_);
+//
+//            for (size_t i = 0; i < n; i++) {
+//              swap2(&ptr[i]);
+//            }
+//
+//          } else if (bps == 32) {
+//            size_t n = data_strip_bytes_ / sizeof(uint32_t);
+//            uint32_t *ptr =
+//                reinterpret_cast<uint32_t *>(data.data() + data_strip_offset_);
+//
+//            for (size_t i = 0; i < n; i++) {
+//              swap4(&ptr[i]);
+//            }
+//
+//          } else if (bps == 64) {
+//            size_t n = data_strip_bytes_ / sizeof(uint64_t);
+//            uint64_t *ptr =
+//                reinterpret_cast<uint64_t *>(data.data() + data_strip_offset_);
+//
+//            for (size_t i = 0; i < n; i++) {
+//              swap8(&ptr[i]);
+//            }
+//          }
+//        }
+//      }
+//
+//      ofs->write(reinterpret_cast<const char *>(data.data()),
+//                 static_cast<std::streamsize>(data.size()));
+//
+//      return true;
+//    }
 
   unsigned int samples_per_pixels_ = 0;
   std::vector<unsigned short> bits_per_samples_;
@@ -655,14 +676,68 @@ struct DNGImage : IFD {
   size_t data_strip_bytes_ = 0;
 };
 
+struct EXIF : IFD {
+  bool SetDateTime(const std::string &ascii) {
+      unsigned int count =
+          static_cast<unsigned int>(ascii.length() + 1);  // +1 for '\0'
+
+      if (count < 2) {
+        // empty string
+        return false;
+      }
+
+      if (count > 4096) {
+        // too large
+        return false;
+      }
+
+      bool ret = WriteTIFFTag(static_cast<unsigned short>(TIFFTAG_DATETIME),
+                              TIFF_ASCII, count,
+                              reinterpret_cast<const unsigned char *>(ascii.data()),
+                              &ifd_tags_, &data_os_);
+
+      if (!ret) {
+        return false;
+      }
+
+      num_fields_++;
+      return true;
+  }
+  
+  bool WriteIFDToStream(const unsigned int data_base_offset,
+                        const unsigned int strip_offset,
+                        std::vector<IFDTag> add_tags,
+                        std::ostream *ofs) const override {
+      // add STRIP_OFFSET tag and sort IFD tags.
+      {
+          // For STRIP_OFFSET we need the actual offset value to data(image),
+          // thus write STRIP_OFFSET here.
+//          unsigned int offset = strip_offset + kHeaderSize;
+          IFDTag ifd;
+          ifd.tag = TIFFTAG_EXIFIFD;
+          ifd.type = TIFF_IFD;
+          ifd.count = 1;
+          ifd.offset_or_value = data_base_offset + kHeaderSize;
+//          ifd.offset_or_value = data_base_offset+kHeaderSize;//(unsigned int)((size_t)ofs->tellp() + kHeaderSize);
+//          ifd.offset_or_value = offset;//(unsigned int)((size_t)ofs->tellp() + kHeaderSize);
+//          ifd.offset_or_value = kHeaderSize;//(unsigned int)((size_t)ofs->tellp() + kHeaderSize);
+//          ifd.offset_or_value = 0;(unsigned int)((size_t)ofs->tellp() + kHeaderSize);
+          add_tags.push_back(ifd);
+      }
+      
+      return IFD::WriteIFDToStream(data_base_offset, strip_offset, add_tags, ofs);
+  }
+
+};
+
 struct DNGWriter {
   ///
   /// Add DNGImage.
   /// It just retains the pointer of the image, thus
   /// application must not free resources until `WriteToFile` has been called.
   ///
-  bool AddImage(const DNGImage *image) {
-    images_.push_back(image);
+  bool Add(const IFD *ifd) {
+    ifds_.push_back(ifd);
 
     return true;
   }
@@ -675,7 +750,7 @@ struct DNGWriter {
   bool swap_endian_ = false;
   bool big_endian_ = false;  // Endianness of DNG file.
 
-  std::vector<const DNGImage *> images_;
+  std::vector<const IFD *> ifds_;
 };
 
 }  // namespace tinydngwriter
@@ -1930,34 +2005,6 @@ bool DNGImage::SetSoftware(const std::string &ascii) {
   return true;
 }
 
-bool DNGImage::SetDateTime(const std::string &ascii) {
-  unsigned int count =
-      static_cast<unsigned int>(ascii.length() + 1);  // +1 for '\0'
-
-  if (count < 2) {
-    // empty string
-    return false;
-  }
-
-  if (count > 4096) {
-    // too large
-    return false;
-  }
-
-  bool ret = WriteTIFFTag(static_cast<unsigned short>(TIFFTAG_DATETIME),
-                          TIFF_ASCII, count,
-                          reinterpret_cast<const unsigned char *>(ascii.data()),
-                          &ifd_tags_, &data_os_);
-
-  if (!ret) {
-    return false;
-  }
-
-  num_fields_++;
-  return true;
-}
-
-
 bool DNGImage::SetActiveArea(const unsigned int values[4]) {
   unsigned int count = 4;
 
@@ -2568,9 +2615,9 @@ bool DNGWriter::WriteToFile(const char *filename, std::string *err) const {
     return false;
   }
 
-  if (images_.size() == 0) {
+  if (ifds_.size() == 0) {
     if (err) {
-      (*err) = "No image added for writing.\n";
+      (*err) = "No ifds added for writing.\n";
     }
 
     return false;
@@ -2581,11 +2628,12 @@ bool DNGWriter::WriteToFile(const char *filename, std::string *err) const {
   size_t strip_offset = 0;
   std::vector<size_t> data_offset_table;
   std::vector<size_t> strip_offset_table;
-  for (size_t i = 0; i < images_.size(); i++) {
-    strip_offset = data_len + images_[i]->GetStripOffset();
+  for (size_t i = 0; i < ifds_.size(); i++) {
+    const IFD* ifd = ifds_[i];
+    strip_offset = data_len + ifd->GetStripOffset();
     data_offset_table.push_back(data_len);
     strip_offset_table.push_back(strip_offset);
-    data_len += images_[i]->GetDataSize();
+    data_len += ifd->GetDataSize();
   }
 
   // 2. Write offset to ifd table.
@@ -2606,12 +2654,12 @@ bool DNGWriter::WriteToFile(const char *filename, std::string *err) const {
 
   // 4. Write image and meta data
   // TODO(syoyo): Write IFD first, then image/meta data
-  for (size_t i = 0; i < images_.size(); i++) {
-    bool ok = images_[i]->WriteDataToStream(&ofs);
+  for (size_t i = 0; i < ifds_.size(); i++) {
+    bool ok = ifds_[i]->WriteDataToStream(&ofs);
     if (!ok) {
       if (err) {
         std::stringstream ss;
-        ss << "Failed to write data at image[" << i << "]. err = " << images_[i]->Error() << "\n";
+        ss << "Failed to write data at image[" << i << "]. err = " << ifds_[i]->Error() << "\n";
         (*err) += ss.str();
       }
       return false;
@@ -2619,14 +2667,14 @@ bool DNGWriter::WriteToFile(const char *filename, std::string *err) const {
   }
 
   // 5. Write IFD entries;
-  for (size_t i = 0; i < images_.size(); i++) {
-    bool ok = images_[i]->WriteIFDToStream(
+  for (size_t i = 0; i < ifds_.size(); i++) {
+    bool ok = ifds_[i]->WriteIFDToStream(
         static_cast<unsigned int>(data_offset_table[i]),
-        static_cast<unsigned int>(strip_offset_table[i]), &ofs);
+        static_cast<unsigned int>(strip_offset_table[i]), {}, &ofs);
     if (!ok) {
       if (err) {
         std::stringstream ss;
-        ss << "Failed to write IFD at image[" << i << "]. err = " << images_[i]->Error() << "\n";
+        ss << "Failed to write IFD at image[" << i << "]. err = " << ifds_[i]->Error() << "\n";
         (*err) += ss.str();
       }
       return false;
@@ -2635,7 +2683,7 @@ bool DNGWriter::WriteToFile(const char *filename, std::string *err) const {
     unsigned int next_ifd_offset =
         static_cast<unsigned int>(ofs.tellp()) + sizeof(unsigned int);
 
-    if (i == (images_.size() - 1)) {
+    if (i == (ifds_.size() - 1)) {
       // Write zero as IFD offset(= end of data)
       next_ifd_offset = 0;
     }
